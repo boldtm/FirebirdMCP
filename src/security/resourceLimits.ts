@@ -4,28 +4,95 @@
 
 import { securityConfig } from './config.js';
 import { createLogger } from '../utils/logger.js';
+import { FirebirdError } from '../utils/errors.js';
 const logger = createLogger('security:resourceLimits');
 
-// Define FirebirdError class if it doesn't exist
-class FirebirdError extends Error {
-    type: string;
-    originalError?: any;
-
-    constructor(message: string, type: string = 'UNKNOWN_ERROR', cause?: any) {
-        super(message);
-        this.name = 'FirebirdError';
-        this.type = type;
-        if (cause) {
-            this.originalError = cause;
-        }
-    }
-}
+// Phase 4.4: Configuration for rate limit map management
+const MAX_RATE_LIMIT_ENTRIES = 10000; // Maximum number of sessions to track
+const STALE_SESSION_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour - sessions older than this are stale
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes - cleanup interval
 
 // Store query counts per session
 const sessionQueryCounts: Map<string, number> = new Map();
 
-// Store rate limiting data
-const rateLimitData: Map<string, { count: number, timestamp: number }> = new Map();
+// Store rate limiting data with last access time for cleanup
+interface RateLimitEntry {
+    count: number;
+    timestamp: number;
+    lastAccess: number; // Phase 4.4: Track last access for stale session cleanup
+}
+const rateLimitData: Map<string, RateLimitEntry> = new Map();
+
+// Phase 4.4: Cleanup interval reference
+let cleanupInterval: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Phase 4.4: Clean up stale sessions from rate limit maps
+ * Removes entries older than STALE_SESSION_TIMEOUT_MS
+ */
+function cleanupStaleSessions(): void {
+    const now = Date.now();
+    let cleaned = 0;
+    
+    for (const [sessionId, data] of rateLimitData.entries()) {
+        if (now - data.lastAccess > STALE_SESSION_TIMEOUT_MS) {
+            rateLimitData.delete(sessionId);
+            sessionQueryCounts.delete(sessionId);
+            cleaned++;
+        }
+    }
+    
+    if (cleaned > 0) {
+        logger.debug(`Cleaned up ${cleaned} stale sessions from rate limit maps`);
+    }
+}
+
+/**
+ * Phase 4.4: Enforce max entries limit with LRU eviction
+ * Removes oldest entries when map exceeds MAX_RATE_LIMIT_ENTRIES
+ */
+function enforceMaxEntries(): void {
+    if (rateLimitData.size <= MAX_RATE_LIMIT_ENTRIES) {
+        return;
+    }
+    
+    // Find and remove the oldest 10% of entries (LRU eviction)
+    const entriesToDelete = Math.ceil(MAX_RATE_LIMIT_ENTRIES * 0.1);
+    const entries = Array.from(rateLimitData.entries())
+        .sort((a, b) => a[1].lastAccess - b[1].lastAccess);
+    
+    for (let i = 0; i < entriesToDelete && i < entries.length; i++) {
+        const [sessionId] = entries[i];
+        rateLimitData.delete(sessionId);
+        sessionQueryCounts.delete(sessionId);
+    }
+    
+    logger.debug(`Evicted ${entriesToDelete} oldest sessions from rate limit maps (LRU)`);
+}
+
+/**
+ * Phase 4.4: Start the cleanup interval
+ * Should be called during server initialization
+ */
+export function startCleanupInterval(): void {
+    if (cleanupInterval) {
+        return; // Already running
+    }
+    cleanupInterval = setInterval(cleanupStaleSessions, CLEANUP_INTERVAL_MS);
+    logger.info('Started rate limit cleanup interval');
+}
+
+/**
+ * Phase 4.4: Stop the cleanup interval
+ * Should be called during server shutdown
+ */
+export function stopCleanupInterval(): void {
+    if (cleanupInterval) {
+        clearInterval(cleanupInterval);
+        cleanupInterval = null;
+        logger.info('Stopped rate limit cleanup interval');
+    }
+}
 
 /**
  * Check if a query exceeds the maximum allowed rows
@@ -100,6 +167,7 @@ export function checkQueryCountLimit(sessionId: string = 'default'): boolean {
 
 /**
  * Check if a session exceeds the rate limit
+ * Uses atomic update pattern to prevent race conditions (Phase 6.3)
  * @param {string} sessionId - Session identifier
  * @returns {boolean} Whether the session exceeds the rate limit
  * @throws {FirebirdError} If the session exceeds the rate limit
@@ -110,40 +178,51 @@ export function checkRateLimit(sessionId: string = 'default'): boolean {
     }
 
     const { queriesPerMinute, burstLimit } = securityConfig.resourceLimits.rateLimit;
-
-    // Get the current rate limit data for the session
-    const data = rateLimitData.get(sessionId) || { count: 0, timestamp: Date.now() };
-
-    // Check if a minute has passed since the last reset
     const now = Date.now();
-    const elapsed = now - data.timestamp;
 
-    if (elapsed >= 60000) {
-        // Reset the count if a minute has passed
-        data.count = 1;
-        data.timestamp = now;
+    // Phase 6.3: Atomic update pattern - compute new value first, then set
+    // This prevents race conditions where multiple requests could read the same stale value
+    let newData: RateLimitEntry;
+    const existingData = rateLimitData.get(sessionId);
+    
+    if (!existingData) {
+        // New session
+        newData = { count: 1, timestamp: now, lastAccess: now };
     } else {
-        // Increment the count
-        data.count++;
+        // Check if a minute has passed since the last reset
+        const elapsed = now - existingData.timestamp;
 
-        // Check if the count exceeds the burst limit
-        if (data.count > burstLimit) {
-            const errorMessage = `Session exceeds burst limit (${data.count} > ${burstLimit})`;
-            logger.warn(`${errorMessage} for session ${sessionId}`);
-            throw new FirebirdError(errorMessage, 'RATE_LIMIT_EXCEEDED');
-        }
+        if (elapsed >= 60000) {
+            // Reset the count if a minute has passed
+            newData = { count: 1, timestamp: now, lastAccess: now };
+        } else {
+            // Increment the count and update last access
+            const newCount = existingData.count + 1;
+            
+            // Check if the count exceeds the burst limit
+            if (newCount > burstLimit) {
+                const errorMessage = `Session exceeds burst limit (${newCount} > ${burstLimit})`;
+                logger.warn(`${errorMessage} for session ${sessionId}`);
+                throw new FirebirdError(errorMessage, 'RATE_LIMIT_EXCEEDED');
+            }
 
-        // Check if the rate exceeds the queries per minute limit
-        const rate = data.count / (elapsed / 60000);
-        if (rate > queriesPerMinute) {
-            const errorMessage = `Session exceeds queries per minute limit (${rate.toFixed(2)} > ${queriesPerMinute})`;
-            logger.warn(`${errorMessage} for session ${sessionId}`);
-            throw new FirebirdError(errorMessage, 'RATE_LIMIT_EXCEEDED');
+            // Check if the rate exceeds the queries per minute limit
+            const rate = newCount / (elapsed / 60000);
+            if (rate > queriesPerMinute) {
+                const errorMessage = `Session exceeds queries per minute limit (${rate.toFixed(2)} > ${queriesPerMinute})`;
+                logger.warn(`${errorMessage} for session ${sessionId}`);
+                throw new FirebirdError(errorMessage, 'RATE_LIMIT_EXCEEDED');
+            }
+            
+            newData = { count: newCount, timestamp: existingData.timestamp, lastAccess: now };
         }
     }
 
-    // Update the rate limit data
-    rateLimitData.set(sessionId, data);
+    // Phase 6.3: Single atomic set operation
+    rateLimitData.set(sessionId, newData);
+    
+    // Phase 4.4: Enforce max entries after adding new entry
+    enforceMaxEntries();
 
     return true;
 }

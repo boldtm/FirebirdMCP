@@ -11,16 +11,23 @@ import { DriverFactory } from './driver-factory.js';
 const logger = createLogger('db:connection');
 
 /**
- * Tipo para el objeto de conexión de Firebird
+ * Type for a Firebird query result
  */
-export interface FirebirdDatabase {
-    query: (sql: string, params: any[], callback: (err: Error | null, results?: any[]) => void) => any;
-    detach: (callback: (err: Error | null) => void) => void;
-    [key: string]: any;
+export interface FirebirdQueryResult {
+    [key: string]: unknown;
 }
 
 /**
- * Interfaz que define las opciones de configuración para la conexión a Firebird
+ * Type for a Firebird connection object
+ */
+export interface FirebirdDatabase {
+    query: (sql: string, params: unknown[], callback: (err: Error | null, results?: FirebirdQueryResult[]) => void) => void;
+    detach: (callback: (err: Error | null) => void) => void;
+    [key: string]: unknown;
+}
+
+/**
+ * Interface that defines configuration options for the Firebird connection
  */
 export interface ConfigOptions {
     host: string;
@@ -130,22 +137,26 @@ export const getDefaultConfig = (): ConfigOptions => {
         port: parseInt(String(globalConfigFromEnv?.port || process.env.FIREBIRD_PORT || process.env.FB_PORT || '3050'), 10),
         database: normalizeDatabasePath(globalConfigFromEnv?.database || process.env.FIREBIRD_DATABASE || process.env.FB_DATABASE),
         user: globalConfigFromEnv?.user || process.env.FIREBIRD_USER || process.env.FB_USER || 'SYSDBA',
-        password: globalConfigFromEnv?.password || process.env.FIREBIRD_PASSWORD || process.env.FB_PASSWORD || 'masterkey',
+        password: globalConfigFromEnv?.password || process.env.FIREBIRD_PASSWORD || process.env.FB_PASSWORD || '', // Phase 4.1: No default password
         role: globalConfigFromEnv?.role || process.env.FIREBIRD_ROLE || process.env.FB_ROLE || undefined,
         pageSize: globalConfigFromEnv?.pageSize || 4096,
         wireCrypt: wireCrypt
     };
 
     // Debug: Log the final configuration (without password)
-    console.error('Final database configuration:');
-    console.error(`host: ${config.host}`);
-    console.error(`port: ${config.port}`);
-    console.error(`database: ${config.database}`);
-    console.error(`user: ${config.user}`);
-    // Don't log password
-    console.error(`role: ${config.role || 'not set'}`);
-    console.error(`pageSize: ${config.pageSize}`);
-    console.error(`wireCrypt: ${config.wireCrypt}`);
+    logger.debug('Final database configuration:');
+    logger.debug(`host: ${config.host}`);
+    logger.debug(`port: ${config.port}`);
+    logger.debug(`database: ${config.database}`);
+    logger.debug(`user: ${config.user}`);
+    logger.debug(`role: ${config.role || 'Not specified'}`);
+    logger.debug(`wireCrypt: ${config.wireCrypt || 'Not specified'}`);
+    logger.debug(`pageSize: ${config.pageSize}`);
+
+    // Phase 7.1: Log warning if password is empty
+    if (!config.password) {
+        logger.warn('No database password provided. Set FIREBIRD_PASSWORD environment variable.');
+    }
 
     return config;
 };
@@ -156,7 +167,7 @@ export const DEFAULT_CONFIG: ConfigOptions = {
     port: 3050,
     database: '',
     user: 'SYSDBA',
-    password: 'masterkey',
+    password: '', // Phase 4.1: Removed hardcoded 'masterkey' default
     role: undefined,
     pageSize: 4096
 };
@@ -165,30 +176,42 @@ export const DEFAULT_CONFIG: ConfigOptions = {
 // FirebirdError is now imported from '../utils/errors.js'
 
 /**
- * Establece conexión con la base de datos usando el driver apropiado
- * @param config - Configuración de conexión a la base de datos
- * @returns Objeto de conexión a la base de datos
- * @throws {FirebirdError} Error categorizado si la conexión falla
+ * Establishes a connection to the database using the appropriate driver
+ * @param config - Database connection configuration
+ * @returns Database connection object
+ * @throws {FirebirdError} Categorized error if the connection fails
  */
-export const connectToDatabase = async (config = getDefaultConfig()): Promise<FirebirdDatabase> => {
+export const connectToDatabase = async (inputConfig?: ConfigOptions): Promise<FirebirdDatabase> => {
+    // Phase 6.2: Create new config object instead of mutating parameter
+    const config = inputConfig ? { ...inputConfig } : getDefaultConfig();
+    
     logger.info(`Connecting to ${config.host}:${config.port}/${config.database}`);
 
-    // Verify minimum parameters
+    // Phase 4.1: Verify password is provided
+    if (!config.password) {
+        throw new FirebirdError(
+            'Database password is required. Set FIREBIRD_PASSWORD environment variable or provide password in config.',
+            ErrorTypes.SECURITY_AUTHENTICATION
+        );
+    }
+
+    // Phase 4.2: Verify database path is provided - throw error instead of using hardcoded path
     if (!config.database) {
-        // Si no hay base de datos configurada, usar una ruta predeterminada para pruebas
-        console.error('No database specified in config, using hardcoded default path');
-        config.database = 'F:/Proyectos/SAI/EMPLOYEE.FDB';
-        console.error(`Using default database path: ${config.database}`);
+        throw new FirebirdError(
+            'Database path is required. Set FIREBIRD_DATABASE environment variable or provide database path in config.',
+            ErrorTypes.DATABASE_CONNECTION
+        );
     }
 
     // Log connection attempt with full details
-    console.error('Attempting to connect with the following configuration:');
-    console.error(`- Host: ${config.host}`);
-    console.error(`- Port: ${config.port}`);
-    console.error(`- Database: ${config.database}`);
-    console.error(`- User: ${config.user}`);
-    console.error(`- Role: ${config.role || 'Not specified'}`);
-    console.error(`- WireCrypt: ${config.wireCrypt || 'Not specified'}`);
+    // Phase 7.1: Use logger instead of console.error
+    logger.debug('Attempting to connect with the following configuration:');
+    logger.debug(`- Host: ${config.host}`);
+    logger.debug(`- Port: ${config.port}`);
+    logger.debug(`- Database: ${config.database}`);
+    logger.debug(`- User: ${config.user}`);
+    logger.debug(`- Role: ${config.role || 'Not specified'}`);
+    logger.debug(`- WireCrypt: ${config.wireCrypt || 'Not specified'}`);
 
     try {
         // Get appropriate driver from factory
@@ -253,11 +276,11 @@ export const connectToDatabase = async (config = getDefaultConfig()): Promise<Fi
  * @returns {Promise<any[]>} Resultado de la consulta
  * @throws {FirebirdError} Error categorizado si la consulta falla
  */
-export const queryDatabase = (db: FirebirdDatabase, sql: string, params: any[] = []): Promise<any[]> => {
+export const queryDatabase = (db: FirebirdDatabase, sql: string, params: unknown[] = []): Promise<FirebirdQueryResult[]> => {
     return new Promise((resolve, reject) => {
         logger.info(`Ejecutando consulta: ${sql.substring(0, 100)}${sql.length > 100 ? '...' : ''}`);
 
-        db.query(sql, params, (err: Error | null, result: any) => {
+        db.query(sql, params, (err: Error | null, result: FirebirdQueryResult[] | undefined) => {
             if (err) {
                 // Categorizar el error para mejor manejo
                 let errorType = 'QUERY_ERROR';

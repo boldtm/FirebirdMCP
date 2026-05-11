@@ -4,22 +4,8 @@
 
 import { securityConfig } from './config.js';
 import { createLogger } from '../utils/logger.js';
+import { FirebirdError } from '../utils/errors.js';
 const logger = createLogger('security:authorization');
-
-// Define FirebirdError class if it doesn't exist
-class FirebirdError extends Error {
-    type: string;
-    originalError?: any;
-
-    constructor(message: string, type: string = 'UNKNOWN_ERROR', cause?: any) {
-        super(message);
-        this.name = 'FirebirdError';
-        this.type = type;
-        if (cause) {
-            this.originalError = cause;
-        }
-    }
-}
 
 /**
  * Interface for user information
@@ -163,7 +149,7 @@ export function checkAllowedTable(tableName: string): boolean {
  * Verify an OAuth2 token
  * @param {string} token - OAuth2 token
  * @returns {Promise<UserInfo>} User information
- * @throws {FirebirdError} If the token is invalid
+ * @throws {FirebirdError} If the token is invalid or timeout occurs
  */
 export async function verifyOAuth2Token(token: string): Promise<UserInfo> {
     if (!securityConfig.authorization || securityConfig.authorization.type !== 'oauth2') {
@@ -175,16 +161,23 @@ export async function verifyOAuth2Token(token: string): Promise<UserInfo> {
     }
 
     const { tokenVerifyUrl, clientId, clientSecret } = securityConfig.authorization.oauth2;
+    
+    // Phase 4.3: Add configurable timeout with AbortController
+    const timeoutMs = securityConfig.authorization.oauth2.timeoutMs || 10000; // Default 10 seconds
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-        // Call the token verification endpoint
+        // Call the token verification endpoint with timeout
         const response = await fetch(tokenVerifyUrl, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`
             },
-            body: JSON.stringify({ token })
+            body: JSON.stringify({ token }),
+            signal: controller.signal
         });
 
         if (!response.ok) {
@@ -202,7 +195,17 @@ export async function verifyOAuth2Token(token: string): Promise<UserInfo> {
 
         return userInfo;
     } catch (error: any) {
+        // Phase 4.3: Handle timeout errors gracefully
+        if (error.name === 'AbortError') {
+            logger.error(`OAuth2 token verification timed out after ${timeoutMs}ms`);
+            throw new FirebirdError(
+                `Token verification timed out after ${timeoutMs}ms`,
+                'AUTHORIZATION_TIMEOUT'
+            );
+        }
         logger.error(`Error verifying OAuth2 token: ${error.message}`);
         throw new FirebirdError(`Token verification failed: ${error.message}`, 'AUTHORIZATION_ERROR');
+    } finally {
+        clearTimeout(timeoutId);
     }
 }

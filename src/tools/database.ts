@@ -102,13 +102,120 @@ export const DescribeBatchTablesArgsSchema = z.object({
     maxConcurrent: z.number().int().min(1).max(10).optional().default(5).describe("Maximum number of concurrent operations (default: 5)")
 });
 
+/**
+ * Structured filter for safe query building
+ */
+export const TableFilterSchema = z.object({
+    column: z.string().min(1).describe("Column name to filter on"),
+    operator: z.enum(['=', '!=', '>', '<', '>=', '<=', 'LIKE', 'NOT LIKE', 'IN', 'NOT IN', 'IS NULL', 'IS NOT NULL']).describe("Comparison operator"),
+    value: z.union([z.string(), z.number(), z.boolean(), z.null()]).optional().describe("Value to compare (not needed for IS NULL/IS NOT NULL)"),
+    values: z.array(z.union([z.string(), z.number(), z.boolean()])).optional().describe("Array of values for IN/NOT IN operators")
+});
+
+export const TableOrderBySchema = z.object({
+    column: z.string().min(1).describe("Column name to order by"),
+    direction: z.enum(['ASC', 'DESC']).default('ASC').describe("Sort direction")
+});
+
 export const GetTableDataArgsSchema = z.object({
     tableName: z.string().min(1).describe("Name of the table to retrieve data from"),
     first: z.number().int().positive().optional().describe("Number of rows to retrieve (FIRST clause in Firebird)"),
     skip: z.number().int().min(0).optional().describe("Number of rows to skip (SKIP clause in Firebird)"),
-    where: z.string().optional().describe("Optional WHERE clause (without the WHERE keyword)"),
-    orderBy: z.string().optional().describe("Optional ORDER BY clause (without the ORDER BY keyword)")
+    filters: z.array(TableFilterSchema).optional().describe("Array of structured filters (replaces unsafe 'where' string)"),
+    filterLogic: z.enum(['AND', 'OR']).default('AND').optional().describe("How to combine multiple filters (default: AND)"),
+    orderBy: z.array(TableOrderBySchema).optional().describe("Array of order by clauses (replaces unsafe 'orderBy' string)")
 });
+
+/**
+ * Validates a column name to prevent SQL injection
+ * @param name - Column or table name to validate
+ * @returns true if valid, false otherwise
+ */
+function isValidIdentifier(name: string): boolean {
+    // Only allow alphanumeric characters and underscores
+    // Must start with a letter or underscore
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+}
+
+/**
+ * Builds a safe WHERE clause from structured filters
+ * @param filters - Array of structured filters
+ * @param logic - AND or OR logic for combining filters
+ * @returns Object with clause string and parameters array
+ */
+function buildWhereClause(
+    filters: z.infer<typeof TableFilterSchema>[],
+    logic: 'AND' | 'OR' = 'AND'
+): { clause: string; params: (string | number | boolean | null)[] } {
+    const conditions: string[] = [];
+    const params: (string | number | boolean | null)[] = [];
+
+    for (const filter of filters) {
+        // Validate column name
+        if (!isValidIdentifier(filter.column)) {
+            throw new FirebirdError(
+                `Invalid column name: ${filter.column}`,
+                'SECURITY_ERROR'
+            );
+        }
+
+        let condition: string;
+
+        switch (filter.operator) {
+            case 'IS NULL':
+                condition = `"${filter.column}" IS NULL`;
+                break;
+            case 'IS NOT NULL':
+                condition = `"${filter.column}" IS NOT NULL`;
+                break;
+            case 'IN':
+            case 'NOT IN':
+                if (!filter.values || filter.values.length === 0) {
+                    throw new FirebirdError(
+                        `IN/NOT IN operator requires a non-empty values array`,
+                        'VALIDATION_ERROR'
+                    );
+                }
+                const placeholders = filter.values.map(() => '?').join(', ');
+                condition = `"${filter.column}" ${filter.operator} (${placeholders})`;
+                params.push(...filter.values);
+                break;
+            default:
+                if (filter.value === undefined) {
+                    throw new FirebirdError(
+                        `Operator ${filter.operator} requires a value`,
+                        'VALIDATION_ERROR'
+                    );
+                }
+                condition = `"${filter.column}" ${filter.operator} ?`;
+                params.push(filter.value);
+        }
+
+        conditions.push(condition);
+    }
+
+    const clause = conditions.join(` ${logic} `);
+    return { clause, params };
+}
+
+/**
+ * Builds a safe ORDER BY clause from structured order specifications
+ * @param orderBy - Array of order by specifications
+ * @returns Safe ORDER BY clause string
+ */
+function buildOrderByClause(orderBy: z.infer<typeof TableOrderBySchema>[]): string {
+    return orderBy
+        .map(ob => {
+            if (!isValidIdentifier(ob.column)) {
+                throw new FirebirdError(
+                    `Invalid column name in ORDER BY: ${ob.column}`,
+                    'SECURITY_ERROR'
+                );
+            }
+            return `"${ob.column}" ${ob.direction}`;
+        })
+        .join(', ');
+}
 
 export const AnalyzeTableStatisticsArgsSchema = z.object({
     tableName: z.string().min(1).describe("Name of the table to analyze")
@@ -547,28 +654,48 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
     tools.set("get-table-data", {
         name: "get-table-data",
         title: "Get Table Data",
-        description: "Retrieves data from a specific table with optional filtering, pagination, and ordering.",
+        description: "Retrieves data from a specific table with optional filtering, pagination, and ordering. Uses structured filters for safe query building.",
         inputSchema: GetTableDataArgsSchema,
         handler: async (args: z.infer<typeof GetTableDataArgsSchema>) => {
-            const { tableName, first, skip, where, orderBy } = args;
+            const { tableName, first, skip, filters, filterLogic = 'AND', orderBy } = args;
             logger.info(`Getting data from table: ${tableName}`);
 
             try {
-                let sql = `SELECT * FROM "${tableName}"`;
-
-                if (where) {
-                    sql += ` WHERE ${where}`;
+                // Validate table name
+                if (!isValidIdentifier(tableName)) {
+                    throw new FirebirdError(
+                        `Invalid table name: ${tableName}`,
+                        'SECURITY_ERROR'
+                    );
                 }
 
-                if (orderBy) {
-                    sql += ` ORDER BY ${orderBy}`;
+                // Build safe query with parameterized filters
+                const params: (string | number | boolean | null)[] = [];
+                let whereClause = '';
+                let orderByClause = '';
+
+                // Build WHERE clause from structured filters
+                if (filters && filters.length > 0) {
+                    const whereResult = buildWhereClause(filters, filterLogic);
+                    whereClause = ` WHERE ${whereResult.clause}`;
+                    params.push(...whereResult.params);
                 }
 
+                // Build ORDER BY clause from structured order specs
+                if (orderBy && orderBy.length > 0) {
+                    orderByClause = ` ORDER BY ${buildOrderByClause(orderBy)}`;
+                }
+
+                // Build final SQL with FIRST/SKIP if specified
+                let sql: string;
                 if (first !== undefined) {
-                    sql = `SELECT FIRST ${first} ${skip ? `SKIP ${skip}` : ''} * FROM "${tableName}"${where ? ` WHERE ${where}` : ''}${orderBy ? ` ORDER BY ${orderBy}` : ''}`;
+                    const skipClause = skip !== undefined ? `SKIP ${skip} ` : '';
+                    sql = `SELECT FIRST ${first} ${skipClause}* FROM "${tableName}"${whereClause}${orderByClause}`;
+                } else {
+                    sql = `SELECT * FROM "${tableName}"${whereClause}${orderByClause}`;
                 }
 
-                const result = await executeQuery(sql);
+                const result = await executeQuery(sql, params);
                 logger.info(`Retrieved ${result.length} rows from ${tableName}`);
 
                 return {

@@ -1,8 +1,8 @@
 /**
  * Database function wrapper module
  * 
- * Este módulo proporciona wrappers para las funciones de base de datos
- * que garantizan que siempre se use la configuración correcta.
+ * This module provides wrappers for database functions
+ * that ensure the correct configuration is always used.
  */
 
 import { ConfigOptions, getGlobalConfig } from './connection.js';
@@ -11,57 +11,57 @@ import { createLogger } from '../utils/logger.js';
 const logger = createLogger('db:wrapper');
 
 /**
- * Wrapper para funciones de base de datos que garantiza el uso de la configuración correcta
- * @param fn Función original que acepta un parámetro de configuración
- * @returns Función wrapped que siempre usa la configuración correcta
+ * Wrapper for database functions that ensures the correct configuration is used
+ * @param fn Original function that accepts a config parameter
+ * @returns Wrapped function that always uses the correct configuration
  */
 export function withCorrectConfig<T extends (...args: any[]) => Promise<any>>(
     fn: T,
-    configParamIndex: number = -1 // Por defecto, asume que config es el último parámetro
+    configParamIndex: number = -1 // By default, assumes config is the last parameter
 ): T {
     return (async (...args: any[]) => {
         try {
-            // Obtener la configuración global
+            // Get the global configuration
             const globalConfig = getGlobalConfig();
             
-            // Si no se especificó el índice del parámetro de configuración, asumimos que es el último
+            // If the config parameter index was not specified, assume it's the last one
             const actualConfigIndex = configParamIndex >= 0 ? configParamIndex : args.length - 1;
             
-            // Si hay una configuración global y el parámetro de configuración no se proporcionó o es undefined
+            // If there is a global config and the config parameter was not provided or is undefined
             if (globalConfig && (!args[actualConfigIndex] || args.length <= actualConfigIndex)) {
-                // Si necesitamos extender el array de argumentos
+                // If we need to extend the arguments array
                 if (args.length <= actualConfigIndex) {
-                    // Crear un nuevo array con la longitud necesaria
+                    // Create a new array with the needed length
                     const newArgs = [...args];
-                    // Rellenar con undefined si es necesario
+                    // Fill with undefined if needed
                     while (newArgs.length < actualConfigIndex) {
                         newArgs.push(undefined);
                     }
-                    // Añadir la configuración global
+                    // Add the global configuration
                     newArgs.push(globalConfig);
-                    // Llamar a la función original con los nuevos argumentos
+                    // Call the original function with the new arguments
                     return await fn(...newArgs);
                 } else {
-                    // Simplemente reemplazar el parámetro de configuración
+                    // Simply replace the config parameter
                     args[actualConfigIndex] = globalConfig;
                 }
             }
             
-            // Llamar a la función original con los argumentos (posiblemente modificados)
+            // Call the original function with the arguments (possibly modified)
             return await fn(...args);
         } catch (error) {
-            // Registrar el error y relanzarlo
-            logger.error(`Error en función wrapped: ${error instanceof Error ? error.message : String(error)}`);
+            // Log the error and rethrow it
+            logger.error(`Error in wrapped function: ${error instanceof Error ? error.message : String(error)}`);
             throw error;
         }
     }) as T;
 }
 
 /**
- * Wrapper para funciones de base de datos que no tienen un parámetro de configuración
- * @param fn Función original
- * @param configFactory Función que devuelve la configuración a usar
- * @returns Función wrapped
+ * Wrapper for database functions that don't have a config parameter
+ * @param fn Original function
+ * @param configFactory Function that returns the configuration to use
+ * @returns Wrapped function
  */
 export function withConfig<T extends (...args: any[]) => Promise<any>>(
     fn: T,
@@ -69,17 +69,17 @@ export function withConfig<T extends (...args: any[]) => Promise<any>>(
 ): T {
     return (async (...args: any[]) => {
         try {
-            // Obtener la configuración
+            // Get the configuration
             const config = configFactory();
             
-            // Añadir la configuración como último argumento
+            // Add the configuration as the last argument
             const newArgs = [...args, config];
             
-            // Llamar a la función original con los nuevos argumentos
+            // Call the original function with the new arguments
             return await fn(...newArgs);
         } catch (error) {
-            // Registrar el error y relanzarlo
-            logger.error(`Error en función wrapped con config: ${error instanceof Error ? error.message : String(error)}`);
+            // Log the error and rethrow it
+            logger.error(`Error in wrapped function with config: ${error instanceof Error ? error.message : String(error)}`);
             throw error;
         }
     }) as T;

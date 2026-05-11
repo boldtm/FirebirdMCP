@@ -1,4 +1,4 @@
-// Esquema de tablas
+// Table schema
 import { createLogger } from '../utils/logger.js';
 import { validateSql } from '../utils/security.js';
 import { DEFAULT_CONFIG } from './connection.js';
@@ -8,18 +8,18 @@ import { executeQuery } from './queries.js';
 const logger = createLogger('db:schema');
 
 /**
- * Obtiene el esquema completo para una tabla específica
- * @param {string} tableName - Nombre de la tabla para la que obtener el esquema
- * @param {object} config - Configuración de conexión a la base de datos (opcional)
- * @returns {object} Esquema de tabla que incluye columnas, claves primarias y claves foráneas
+ * Gets the complete schema for a specific table
+ * @param {string} tableName - Table name to get the schema for
+ * @param {object} config - Database connection configuration (optional)
+ * @returns {object} Table schema including columns, primary keys and foreign keys
  */
 export const getTableSchema = async (tableName: string, config = DEFAULT_CONFIG) => {
     try {
         if (!validateSql(tableName)) {
-            throw new FirebirdError(`Nombre de tabla inválido: ${tableName}`, 'VALIDATION_ERROR');
+            throw new FirebirdError(`Invalid table name: ${tableName}`, 'VALIDATION_ERROR');
         }
 
-        // Consulta para obtener columnas y tipos
+        // Query to get columns and types
         const columnsSql = `
             SELECT
                 TRIM(rf.RDB$FIELD_NAME) AS field_name,
@@ -69,7 +69,7 @@ export const getTableSchema = async (tableName: string, config = DEFAULT_CONFIG)
             ORDER BY rf.RDB$FIELD_POSITION
         `;
 
-        // Consulta para obtener clave primaria
+        // Query to get primary key
         const primaryKeySql = `
             SELECT TRIM(i.RDB$FIELD_NAME) as field_name
             FROM RDB$RELATION_CONSTRAINTS rc
@@ -79,7 +79,7 @@ export const getTableSchema = async (tableName: string, config = DEFAULT_CONFIG)
             ORDER BY i.RDB$FIELD_POSITION
         `;
 
-        // Consulta para obtener claves foráneas
+        // Query to get foreign keys
         const foreignKeysSql = `
             SELECT
                 TRIM(i.RDB$FIELD_NAME) as field_name,
@@ -97,7 +97,7 @@ export const getTableSchema = async (tableName: string, config = DEFAULT_CONFIG)
             ORDER BY i.RDB$FIELD_POSITION
         `;
 
-        // Consulta para obtener índices
+        // Query to get indexes
         const indexesSql = `
             SELECT
                 TRIM(i.RDB$INDEX_NAME) as index_name,
@@ -114,7 +114,7 @@ export const getTableSchema = async (tableName: string, config = DEFAULT_CONFIG)
             ORDER BY i.RDB$INDEX_NAME, s.RDB$FIELD_POSITION
         `;
 
-        // Ejecutar consultas en paralelo
+        // Execute queries in parallel
         const [columnsResult, primaryKeyResult, foreignKeysResult, indexesResult] = await Promise.all([
             executeQuery(columnsSql, [tableName], config),
             executeQuery(primaryKeySql, [tableName], config),
@@ -122,7 +122,7 @@ export const getTableSchema = async (tableName: string, config = DEFAULT_CONFIG)
             executeQuery(indexesSql, [tableName], config),
         ]);
 
-        // Procesar columnas
+        // Process columns
         const columns = columnsResult.map((col: any) => ({
             name: col.FIELD_NAME,
             type: col.FIELD_TYPE,
@@ -131,10 +131,10 @@ export const getTableSchema = async (tableName: string, config = DEFAULT_CONFIG)
             position: col.POSITION
         }));
 
-        // Procesar clave primaria
+        // Process primary key
         const primaryKey = primaryKeyResult.map((pk: any) => pk.FIELD_NAME);
 
-        // Procesar claves foráneas
+        // Process foreign keys
         const foreignKeys: Array<{ column: string; references: { table: string; column: string } }> = [];
         foreignKeysResult.forEach((fk: any) => {
             foreignKeys.push({
@@ -146,7 +146,7 @@ export const getTableSchema = async (tableName: string, config = DEFAULT_CONFIG)
             });
         });
 
-        // Procesar índices
+        // Process indexes
         const indexesMap = new Map();
         indexesResult.forEach((idx: any) => {
             const indexName = idx.INDEX_NAME;
@@ -161,7 +161,7 @@ export const getTableSchema = async (tableName: string, config = DEFAULT_CONFIG)
         });
         const indexes = Array.from(indexesMap.values());
 
-        // Retornar esquema completo
+        // Return complete schema
         return {
             name: tableName,
             columns,
@@ -170,12 +170,12 @@ export const getTableSchema = async (tableName: string, config = DEFAULT_CONFIG)
             indexes: indexes.length > 0 ? indexes : undefined
         };
     } catch (error) {
-        logger.error(`Error obteniendo esquema de tabla ${tableName}: ${error}`);
+        logger.error(`Error getting table schema for ${tableName}: ${error}`);
         if (error instanceof FirebirdError) {
             throw error;
         } else {
             throw new FirebirdError(
-                `Error inesperado obteniendo esquema para ${tableName}: ${(error as Error).message}`,
+                `Unexpected error getting schema for ${tableName}: ${(error as Error).message}`,
                 'SCHEMA_ERROR',
                 error
             );

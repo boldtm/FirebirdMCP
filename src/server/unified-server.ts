@@ -36,6 +36,7 @@ export class UnifiedMcpServer {
     private config: Required<UnifiedServerConfig>;
     private sseRouter: any;
     private streamableRouter: any;
+    private sseServerPromise: Promise<void> | null = null; // Phase 5.1: Track SSE server initialization
 
     constructor(
         private createServerInstance: () => Promise<McpServer>,
@@ -123,13 +124,8 @@ export class UnifiedMcpServer {
         // SSE Protocol Support (Legacy)
         if (this.config.enableSSE) {
             logger.info('Enabling SSE protocol support');
-            // Create a server instance for SSE
-            this.createServerInstance().then(_server => {
-                this.sseRouter = createSseRouter();
-                this.app.use('/', this.sseRouter);
-            }).catch(error => {
-                logger.error('Error creating SSE server instance:', { error });
-            });
+            // Phase 5.1: Move async initialization to start() method
+            // SSE router will be initialized in start() method
         }
 
         // Streamable HTTP Protocol Support (Modern)
@@ -252,8 +248,21 @@ export class UnifiedMcpServer {
 
     /**
      * Starts the unified server
+     * Phase 5.1: All async initialization happens here, not in constructor
      */
     async start(): Promise<void> {
+        // Phase 5.1: Initialize SSE router before starting server
+        if (this.config.enableSSE) {
+            try {
+                this.sseRouter = createSseRouter();
+                this.app.use('/', this.sseRouter);
+                logger.info('SSE router initialized successfully');
+            } catch (error) {
+                logger.error('Error initializing SSE router:', { error });
+                throw error;
+            }
+        }
+        
         return new Promise((resolve, reject) => {
             try {
                 this.server = this.app.listen(this.config.port, () => {

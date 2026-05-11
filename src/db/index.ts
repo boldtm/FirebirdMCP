@@ -1,14 +1,14 @@
 /**
  * Database module index
  *
- * Este módulo exporta todas las funciones de base de datos,
- * utilizando las versiones wrapped que garantizan el uso de la configuración correcta.
+ * This module exports all database functions,
+ * using the wrapped versions that ensure the correct configuration is always used.
  */
 
-// Exportar las versiones wrapped de las funciones de consulta
+// Export the wrapped versions of query functions
 export * from './wrapped-queries.js';
 
-// Exportar otras funciones y tipos
+// Export other functions and types
 export {
     DEFAULT_CONFIG,
     getGlobalConfig,

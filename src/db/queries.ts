@@ -1,4 +1,4 @@
-// Consultas a la base de datos
+// Database queries
 import { existsSync, readdirSync } from 'fs';
 import { join, extname } from 'path';
 import { createLogger } from '../utils/logger.js';
@@ -10,17 +10,17 @@ import {
     ConfigOptions,
     getGlobalConfig
 } from './connection.js';
-import { FirebirdError } from '../utils/errors.js';
+import { FirebirdError, ErrorTypes } from '../utils/errors.js';
 import { validateSql } from '../utils/security.js';
 import { withCorrectConfig } from './wrapper.js';
 
 const logger = createLogger('db:queries');
 
-// Directorio de bases de datos
+// Database directory
 export const DATABASE_DIR = process.env.FIREBIRD_DB_DIR || './databases';
 
 /**
- * Interfaces para resultados de consultas
+ * Interfaces for query results
  */
 export interface DatabaseInfo {
     name: string;
@@ -87,10 +87,10 @@ export const executeQuery = async (sql: string, params: any[] = [], config = DEF
     }
     let db: FirebirdDatabase | null = null;
     try {
-        // Validar la consulta SQL para prevenir inyección
+        // Validate the SQL query to prevent injection
         if (!validateSql(sql)) {
             throw new FirebirdError(
-                `Consulta SQL potencialmente insegura: ${sql.substring(0, 100)}${sql.length > 100 ? '...' : ''}`,
+                `Potentially unsafe SQL query: ${sql.substring(0, 100)}${sql.length > 100 ? '...' : ''}`,
                 'SECURITY_ERROR'
             );
         }
@@ -98,45 +98,45 @@ export const executeQuery = async (sql: string, params: any[] = [], config = DEF
         db = await connectToDatabase(config);
         const result = await queryDatabase(db, sql, params);
         return result;
-    } catch (error: any) {
-        // Propagar el error original si ya es un FirebirdError
+    } catch (error: unknown) {
+        // Propagate the original error if it is already a FirebirdError
         if (error instanceof FirebirdError) {
             throw error;
         }
 
-        // Categorizar el error
-        const errorMessage = `Error ejecutando consulta: ${error.message || error}`;
+        // Phase 5.2: Standardize error handling with proper type
+        const errorMessage = `Error executing query: ${error instanceof Error ? error.message : String(error)}`;
         logger.error(errorMessage);
-        throw new FirebirdError(errorMessage, 'QUERY_ERROR', error);
+        throw new FirebirdError(errorMessage, ErrorTypes.DATABASE_QUERY, error);
     } finally {
-        // Cerrar la conexión en un bloque finally para asegurar que siempre se cierre
+        // Close the connection in a finally block to ensure it always closes
         if (db) {
             try {
                 await new Promise<void>((resolve) => {
                     db?.detach((err) => {
                         if (err) {
-                            logger.error(`Error al cerrar la conexión: ${err.message}`);
+                            logger.error(`Error closing connection: ${err.message}`);
                         }
                         resolve();
                     });
                 });
-            } catch (detachError: any) {
-                logger.error(`Error al cerrar la conexión: ${detachError.message}`);
+            } catch (detachError: unknown) {
+                logger.error(`Error closing connection: ${detachError instanceof Error ? detachError.message : String(detachError)}`);
             }
         }
     }
 };
 
 /**
- * Lista todas las bases de datos Firebird disponibles en el directorio de bases de datos
- * @returns {DatabaseInfo[]} Array de objetos de base de datos con nombre, ruta y URI
+ * Lists all available Firebird databases in the database directory
+ * @returns {DatabaseInfo[]} Array of database objects with name, path and URI
  */
 export const getDatabases = (): DatabaseInfo[] => {
     try {
-        logger.info(`Buscando bases de datos en: ${DATABASE_DIR}`);
+        logger.info(`Searching for databases in: ${DATABASE_DIR}`);
 
         if (!existsSync(DATABASE_DIR)) {
-            logger.warn(`El directorio de bases de datos no existe: ${DATABASE_DIR}`);
+            logger.warn(`Database directory does not exist: ${DATABASE_DIR}`);
             return [];
         }
 
@@ -148,20 +148,22 @@ export const getDatabases = (): DatabaseInfo[] => {
                 uri: `firebird://database/${file}`
             }));
 
-        logger.info(`Se encontraron ${databases.length} bases de datos`);
+        logger.info(`Found ${databases.length} databases`);
         return databases;
-    } catch (error: any) {
-        const errorMessage = `Error al listar bases de datos: ${error.message || error}`;
+    } catch (error: unknown) {
+        // Phase 5.2: Standardize error handling
+        const errorMessage = `Error listing databases: ${error instanceof Error ? error.message : String(error)}`;
         logger.error(errorMessage);
+        // Return empty array for backward compatibility (this is a non-critical function)
         return [];
     }
 };
 
 /**
- * Obtiene todas las tablas de usuario de la base de datos
- * @param {ConfigOptions} config - Configuración de conexión a la base de datos (opcional)
- * @returns {Promise<TableInfo[]>} Array de objetos de tabla con nombre y URI
- * @throws {FirebirdError} Si hay un error de conexión o de consulta
+ * Gets all user tables from the database
+ * @param {ConfigOptions} config - Database connection configuration (optional)
+ * @returns {Promise<TableInfo[]>} Array of table objects with name and URI
+ * @throws {FirebirdError} If there is a connection or query error
  */
 export const getTables = async (config = DEFAULT_CONFIG): Promise<TableInfo[]> => {
     // Try to load config from global variable first
@@ -171,7 +173,7 @@ export const getTables = async (config = DEFAULT_CONFIG): Promise<TableInfo[]> =
         config = globalConfig;
     }
     try {
-        logger.info('Obteniendo lista de tablas');
+        logger.info('Getting list of tables');
 
         const sql = `
             SELECT TRIM(RDB$RELATION_NAME) AS NAME
@@ -188,25 +190,25 @@ export const getTables = async (config = DEFAULT_CONFIG): Promise<TableInfo[]> =
             uri: `firebird://table/${table.NAME}`
         }));
 
-        logger.info(`Se encontraron ${tableInfos.length} tablas`);
+        logger.info(`Found ${tableInfos.length} tables`);
         return tableInfos;
     } catch (error: any) {
-        // Propagar el error si ya es un FirebirdError
+        // Propagate the error if it is already a FirebirdError
         if (error instanceof FirebirdError) {
             throw error;
         }
 
-        const errorMessage = `Error al listar tablas: ${error.message || error}`;
+        const errorMessage = `Error listing tables: ${error.message || error}`;
         logger.error(errorMessage);
         throw new FirebirdError(errorMessage, 'TABLE_LIST_ERROR', error);
     }
 };
 
 /**
- * Obtiene todas las vistas de usuario de la base de datos
- * @param {ConfigOptions} config - Configuración de conexión a la base de datos (opcional)
- * @returns {Promise<TableInfo[]>} Array de objetos de vista con nombre y URI
- * @throws {FirebirdError} Si hay un error de conexión o de consulta
+ * Gets all user views from the database
+ * @param {ConfigOptions} config - Database connection configuration (optional)
+ * @returns {Promise<TableInfo[]>} Array of view objects with name and URI
+ * @throws {FirebirdError} If there is a connection or query error
  */
 export const getViews = async (config = DEFAULT_CONFIG): Promise<TableInfo[]> => {
     // Try to load config from global variable first
@@ -216,7 +218,7 @@ export const getViews = async (config = DEFAULT_CONFIG): Promise<TableInfo[]> =>
         config = globalConfig;
     }
     try {
-        logger.info('Obteniendo lista de vistas');
+        logger.info('Getting list of views');
 
         const sql = `
             SELECT TRIM(RDB$RELATION_NAME) AS NAME
@@ -233,29 +235,29 @@ export const getViews = async (config = DEFAULT_CONFIG): Promise<TableInfo[]> =>
             uri: `firebird://view/${view.NAME}`
         }));
 
-        logger.info(`Se encontraron ${viewInfos.length} vistas`);
+        logger.info(`Found ${viewInfos.length} views`);
         return viewInfos;
     } catch (error: any) {
-        // Propagar el error si ya es un FirebirdError
+        // Propagate the error if it is already a FirebirdError
         if (error instanceof FirebirdError) {
             throw error;
         }
 
-        const errorMessage = `Error al listar vistas: ${error.message || error}`;
+        const errorMessage = `Error listing views: ${error.message || error}`;
         logger.error(errorMessage);
         throw new FirebirdError(errorMessage, 'VIEW_LIST_ERROR', error);
     }
 };
 
 /**
- * Obtiene todos los procedimientos almacenados de usuario de la base de datos
- * @param {ConfigOptions} config - Configuración de conexión a la base de datos (opcional)
- * @returns {Promise<TableInfo[]>} Array de objetos de procedimiento con nombre y URI
- * @throws {FirebirdError} Si hay un error de conexión o de consulta
+ * Gets all user stored procedures from the database
+ * @param {ConfigOptions} config - Database connection configuration (optional)
+ * @returns {Promise<TableInfo[]>} Array of procedure objects with name and URI
+ * @throws {FirebirdError} If there is a connection or query error
  */
 export const getProcedures = async (config = DEFAULT_CONFIG): Promise<TableInfo[]> => {
     try {
-        logger.info('Obteniendo lista de procedimientos almacenados');
+        logger.info('Getting list of stored procedures');
 
         const sql = `
             SELECT TRIM(RDB$PROCEDURE_NAME) AS NAME
@@ -271,26 +273,26 @@ export const getProcedures = async (config = DEFAULT_CONFIG): Promise<TableInfo[
             uri: `firebird://procedure/${proc.NAME}`
         }));
 
-        logger.info(`Se encontraron ${procedureInfos.length} procedimientos almacenados`);
+        logger.info(`Found ${procedureInfos.length} stored procedures`);
         return procedureInfos;
     } catch (error: any) {
-        // Propagar el error si ya es un FirebirdError
+        // Propagate the error if it is already a FirebirdError
         if (error instanceof FirebirdError) {
             throw error;
         }
 
-        const errorMessage = `Error al listar procedimientos: ${error.message || error}`;
+        const errorMessage = `Error listing procedures: ${error.message || error}`;
         logger.error(errorMessage);
         throw new FirebirdError(errorMessage, 'PROCEDURE_LIST_ERROR', error);
     }
 };
 
 /**
- * Obtiene descripciones de campos para una tabla específica
- * @param {string} tableName - Nombre de la tabla
- * @param {ConfigOptions} config - Configuración de conexión a la base de datos (opcional)
- * @returns {Promise<FieldInfo[]>} Array de objetos que contienen nombres y descripciones de campos
- * @throws {FirebirdError} Si hay un error de conexión, de consulta o el nombre de tabla es inválido
+ * Gets field descriptions for a specific table
+ * @param {string} tableName - Table name
+ * @param {ConfigOptions} config - Database connection configuration (optional)
+ * @returns {Promise<FieldInfo[]>} Array of objects containing field names and descriptions
+ * @throws {FirebirdError} If there is a connection error, query error, or invalid table name
  */
 export const getFieldDescriptions = async (tableName: string, config = DEFAULT_CONFIG): Promise<FieldInfo[]> => {
     // Try to load config from global variable first
@@ -300,11 +302,11 @@ export const getFieldDescriptions = async (tableName: string, config = DEFAULT_C
         config = globalConfig;
     }
     try {
-        logger.info(`Obteniendo descripciones de campos para la tabla: ${tableName}`);
+        logger.info(`Getting field descriptions for table: ${tableName}`);
 
         if (!validateSql(tableName)) {
             throw new FirebirdError(
-                `Nombre de tabla inválido: ${tableName}`,
+                `Invalid table name: ${tableName}`,
                 'VALIDATION_ERROR'
             );
         }
@@ -324,9 +326,9 @@ export const getFieldDescriptions = async (tableName: string, config = DEFAULT_C
         const fields = await executeQuery(sql, [tableName], config);
 
         if (fields.length === 0) {
-            logger.warn(`No se encontraron campos para la tabla: ${tableName}`);
+            logger.warn(`No fields found for table: ${tableName}`);
         } else {
-            logger.info(`Se encontraron ${fields.length} campos para la tabla: ${tableName}`);
+            logger.info(`Found ${fields.length} fields for table: ${tableName}`);
         }
 
         return fields.map((field: any) => ({
@@ -334,23 +336,23 @@ export const getFieldDescriptions = async (tableName: string, config = DEFAULT_C
             description: field.DESCRIPTION || null
         }));
     } catch (error: any) {
-        // Propagar el error si ya es un FirebirdError
+        // Propagate the error if it is already a FirebirdError
         if (error instanceof FirebirdError) {
             throw error;
         }
 
-        const errorMessage = `Error obteniendo descripciones de campos para ${tableName}: ${error.message || error}`;
+        const errorMessage = `Error getting field descriptions for ${tableName}: ${error.message || error}`;
         logger.error(errorMessage);
         throw new FirebirdError(errorMessage, 'FIELD_DESCRIPTION_ERROR', error);
     }
 };
 
 /**
- * Obtiene la estructura detallada de una tabla específica
- * @param {string} tableName - Nombre de la tabla
- * @param {ConfigOptions} config - Configuración de conexión a la base de datos (opcional)
- * @returns {Promise<ColumnInfo[]>} Array de objetos con información detallada de cada columna
- * @throws {FirebirdError} Si hay un error de conexión, de consulta o el nombre de tabla es inválido
+ * Gets the detailed structure of a specific table
+ * @param {string} tableName - Table name
+ * @param {ConfigOptions} config - Database connection configuration (optional)
+ * @returns {Promise<ColumnInfo[]>} Array of objects with detailed column information
+ * @throws {FirebirdError} If there is a connection error, query error, or invalid table name
  */
 export const describeTable = async (tableName: string, config = DEFAULT_CONFIG): Promise<ColumnInfo[]> => {
     // Try to load config from global variable first
@@ -360,16 +362,16 @@ export const describeTable = async (tableName: string, config = DEFAULT_CONFIG):
         config = globalConfig;
     }
     try {
-        logger.info(`Obteniendo estructura de la tabla: ${tableName}`);
+        logger.info(`Getting table structure for: ${tableName}`);
 
         if (!validateSql(tableName)) {
             throw new FirebirdError(
-                `Nombre de tabla inválido: ${tableName}`,
+                `Invalid table name: ${tableName}`,
                 'VALIDATION_ERROR'
             );
         }
 
-        // Consulta para obtener información de las columnas
+        // Query to get column information
         const sql = `
             SELECT
                 TRIM(rf.RDB$FIELD_NAME) as FIELD_NAME,
@@ -414,14 +416,14 @@ export const describeTable = async (tableName: string, config = DEFAULT_CONFIG):
         const columns = await executeQuery(sql, [tableName], config);
 
         if (columns.length === 0) {
-            logger.warn(`No se encontraron columnas para la tabla: ${tableName}`);
+            logger.warn(`No columns found for table: ${tableName}`);
             throw new FirebirdError(
-                `No se encontraron columnas para la tabla: ${tableName}. Es posible que la tabla no exista.`,
+                `No columns found for table: ${tableName}. The table may not exist.`,
                 'TABLE_NOT_FOUND'
             );
         }
 
-        logger.info(`Se encontraron ${columns.length} columnas para la tabla: ${tableName}`);
+        logger.info(`Found ${columns.length} columns for table: ${tableName}`);
 
         return columns.map((col: any) => ({
             field_name: col.FIELD_NAME,
@@ -434,22 +436,22 @@ export const describeTable = async (tableName: string, config = DEFAULT_CONFIG):
             description: col.DESCRIPTION || null
         }));
     } catch (error: any) {
-        // Propagar el error si ya es un FirebirdError
+        // Propagate the error if it is already a FirebirdError
         if (error instanceof FirebirdError) {
             throw error;
         }
 
-        const errorMessage = `Error describiendo la tabla ${tableName}: ${error.message || error}`;
+        const errorMessage = `Error describing table ${tableName}: ${error.message || error}`;
         logger.error(errorMessage);
         throw new FirebirdError(errorMessage, 'TABLE_DESCRIBE_ERROR', error);
     }
 };
 
 /**
- * Obtiene una lista de todas las tablas en la base de datos
- * @param {ConfigOptions} config - Configuración de conexión a la base de datos (opcional)
- * @returns {Promise<string[]>} Array de nombres de tablas
- * @throws {FirebirdError} Si hay un error de conexión o de consulta
+ * Gets a list of all tables in the database
+ * @param {ConfigOptions} config - Database connection configuration (optional)
+ * @returns {Promise<string[]>} Array of table names
+ * @throws {FirebirdError} If there is a connection or query error
  */
 export const listTables = async (config = DEFAULT_CONFIG): Promise<string[]> => {
     // Try to load config from global variable first
@@ -459,7 +461,7 @@ export const listTables = async (config = DEFAULT_CONFIG): Promise<string[]> => 
         config = globalConfig;
     }
     try {
-        logger.info('Obteniendo lista de tablas de usuario');
+        logger.info('Getting list of user tables');
 
         const sql = `
             SELECT RDB$RELATION_NAME
@@ -471,18 +473,18 @@ export const listTables = async (config = DEFAULT_CONFIG): Promise<string[]> => 
 
         const tables = await executeQuery(sql, [], config);
 
-        // Firebird puede devolver nombres con espacios al final, así que hacemos trim
+        // Firebird may return names with trailing spaces, so trim them
         const tableNames = tables.map((table: any) => table.RDB$RELATION_NAME.trim());
 
-        logger.info(`Se encontraron ${tableNames.length} tablas de usuario`);
+        logger.info(`Found ${tableNames.length} user tables`);
         return tableNames;
     } catch (error: any) {
-        // Propagar el error si ya es un FirebirdError
+        // Propagate the error if it is already a FirebirdError
         if (error instanceof FirebirdError) {
             throw error;
         }
 
-        const errorMessage = `Error al listar tablas: ${error.message || error}`;
+        const errorMessage = `Error listing tables: ${error.message || error}`;
         logger.error(errorMessage);
         throw new FirebirdError(errorMessage, 'TABLE_LIST_ERROR', error);
     }
@@ -974,12 +976,12 @@ export const executeBatchQueries = async (
 };
 
 /**
- * Obtiene la estructura detallada de múltiples tablas en paralelo
- * @param {string[]} tableNames - Array de nombres de tablas
- * @param {ConfigOptions} config - Configuración de conexión a la base de datos (opcional)
- * @param {number} maxConcurrent - Número máximo de consultas concurrentes (por defecto: 5)
- * @returns {Promise<Array<{tableName: string, schema: ColumnInfo[] | null, error?: string, errorType?: string}>>} Array de resultados con la estructura de cada tabla
- * @throws {FirebirdError} Si hay un error de validación o configuración
+ * Gets the detailed structure of multiple tables in parallel
+ * @param {string[]} tableNames - Array of table names
+ * @param {ConfigOptions} config - Database connection configuration (optional)
+ * @param {number} maxConcurrent - Maximum number of concurrent queries (default: 5)
+ * @returns {Promise<Array<{tableName: string, schema: ColumnInfo[] | null, error?: string, errorType?: string}>>} Array of results with the structure of each table
+ * @throws {FirebirdError} If there is a validation or configuration error
  */
 export const describeBatchTables = async (
     tableNames: string[],
@@ -1068,5 +1070,5 @@ export const describeBatchTables = async (
     return results;
 };
 
-// Nota: En lugar de reexportar las funciones, vamos a crear un archivo separado
-// que exporte versiones wrapped de estas funciones para evitar conflictos de exportación.
+// Note: Instead of re-exporting the functions, we'll create a separate file
+// that exports wrapped versions of these functions to avoid export conflicts.

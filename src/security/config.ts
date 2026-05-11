@@ -60,7 +60,8 @@ export const AuthorizationSchema = z.object({
         tokenVerifyUrl: z.string().url(),
         clientId: z.string(),
         clientSecret: z.string(),
-        scope: z.string().optional()
+        scope: z.string().optional(),
+        timeoutMs: z.number().int().positive().default(10000) // Phase 4.3: Configurable timeout
     }).optional(),
     rolePermissions: z.record(z.string(), z.object({
         tables: z.array(z.string()).optional(),
@@ -160,6 +161,7 @@ export interface SecurityConfig {
             clientId: string;
             clientSecret: string;
             scope?: string;
+            timeoutMs?: number; // Phase 4.3: Configurable timeout for OAuth2 token verification
         };
         rolePermissions?: Record<string, {
             tables?: string[];
@@ -214,23 +216,48 @@ export function loadSecurityConfig(configPath?: string): SecurityConfig {
 }
 
 /**
- * Global security configuration instance
+ * Phase 6.1: Global security configuration instance (private)
+ * Use getSecurityConfig() to access the configuration
  */
-export const securityConfig: SecurityConfig = { ...DEFAULT_SECURITY_CONFIG };
+let _securityConfig: SecurityConfig = { ...DEFAULT_SECURITY_CONFIG };
+
+/**
+ * Phase 6.1: Get the current security configuration (immutable access)
+ * Returns a copy to prevent external mutation
+ * @returns {SecurityConfig} Current security configuration
+ */
+export function getSecurityConfig(): SecurityConfig {
+    return { ..._securityConfig };
+}
+
+/**
+ * Phase 6.1: For backward compatibility - use getSecurityConfig() instead
+ * This is a getter that returns a copy to prevent mutation
+ */
+export const securityConfig: SecurityConfig = new Proxy({} as SecurityConfig, {
+    get(_target, prop) {
+        return _securityConfig[prop as keyof SecurityConfig];
+    },
+    set() {
+        logger.error('Direct mutation of securityConfig is not allowed. Use initSecurityConfig() instead.');
+        return false; // Prevent mutation
+    }
+});
 
 /**
  * Initialize security configuration
+ * Phase 6.1: Creates new config object instead of mutating global state
  * @param {string} configPath - Path to the configuration file
  */
 export function initSecurityConfig(configPath?: string): void {
     const config = loadSecurityConfig(configPath);
 
-    // Update the global security configuration
-    Object.assign(securityConfig, config);
+    // Phase 6.1: Replace the entire config object instead of mutating
+    _securityConfig = { ...DEFAULT_SECURITY_CONFIG, ...config };
 
     // Initialize audit logging if enabled
-    if (securityConfig.audit?.enabled) {
-        initAuditLogging(securityConfig.audit);
+    if (_securityConfig.audit?.enabled) {
+        initAuditLogging(_securityConfig.audit);
     }
 
     logger.info('Security configuration initialized');

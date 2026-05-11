@@ -5,7 +5,7 @@
 
 import { createLogger } from '../utils/logger.js';
 import { FirebirdError, ErrorTypes } from '../utils/errors.js';
-import type { ConfigOptions, FirebirdDatabase } from './connection.js';
+import type { ConfigOptions, FirebirdDatabase, FirebirdQueryResult } from './connection.js';
 import { createRequire } from 'module';
 
 const logger = createLogger('db:driver-factory');
@@ -48,10 +48,42 @@ export interface IFirebirdDriver {
 }
 
 /**
+ * Interface for native driver attachment
+ */
+interface NativeAttachment {
+    startTransaction(): Promise<NativeTransaction>;
+    executeQuery(transaction: NativeTransaction | null, sql: string, params: unknown[]): Promise<NativeResultSet>;
+    disconnect(): Promise<void>;
+}
+
+/**
+ * Interface for native driver transaction
+ */
+interface NativeTransaction {
+    commit(): Promise<void>;
+    rollback(): Promise<void>;
+}
+
+/**
+ * Interface for native driver result set
+ */
+interface NativeResultSet {
+    fetchAsObject(): Promise<Record<string, unknown>[]>;
+    close(): Promise<void>;
+}
+
+/**
+ * Interface for native driver client
+ */
+interface NativeClient {
+    connect(connectionString: string, options: { username: string; password: string; role?: string }): Promise<NativeAttachment>;
+}
+
+/**
  * Pure JavaScript driver implementation (node-firebird)
  */
 class PureJSDriver implements IFirebirdDriver {
-    private Firebird: any;
+    private Firebird: typeof import('node-firebird') | null = null;
     
     constructor() {
         // Dynamic import to avoid issues if not installed
@@ -60,7 +92,7 @@ class PureJSDriver implements IFirebirdDriver {
             this.Firebird = null;
         } catch (error) {
             throw new FirebirdError(
-                'node-firebird no está instalado',
+                'node-firebird is not installed',
                 ErrorTypes.DATABASE_CONNECTION,
                 { originalError: error }
             );
@@ -89,24 +121,24 @@ class PureJSDriver implements IFirebirdDriver {
                 pageSize: config.pageSize
             };
             
-            logger.info('Conectando con node-firebird (Pure JavaScript)...', {
+            logger.info('Connecting with node-firebird (Pure JavaScript)...', {
                 host: options.host,
                 port: options.port,
                 database: options.database,
                 user: options.user
             });
             
-            this.Firebird.attach(options, (err: Error | null, db: FirebirdDatabase) => {
+            this.Firebird!.attach(options, (err: Error | null, db) => {
                 if (err) {
-                    logger.error('Error al conectar con node-firebird', { error: err });
+                    logger.error('Error connecting with node-firebird', { error: err });
                     reject(new FirebirdError(
-                        `Error al conectar a la base de datos: ${err.message}`,
+                        `Error connecting to database: ${err.message}`,
                         ErrorTypes.DATABASE_CONNECTION,
                         { originalError: err }
                     ));
                 } else {
-                    logger.info('Conexión exitosa con node-firebird');
-                    resolve(db);
+                    logger.info('Connection successful with node-firebird');
+                    resolve(db as unknown as FirebirdDatabase);
                 }
             });
         });
@@ -125,8 +157,8 @@ class PureJSDriver implements IFirebirdDriver {
  * Native driver implementation (node-firebird-driver-native)
  */
 class NativeDriver implements IFirebirdDriver {
-    private client: any = null;
-    private attachment: any = null;
+    private client: NativeClient | null = null;
+    private attachment: NativeAttachment | null = null;
     
     async initialize(): Promise<void> {
         if (!this.client) {
@@ -154,7 +186,7 @@ class NativeDriver implements IFirebirdDriver {
 
                 logger.info('Creating native client...', { loadMethod });
                 this.client = nativeModule.createNativeClient(nativeModule.getDefaultLibraryFilename());
-                logger.info('✅ Cliente nativo de Firebird inicializado correctamente', { loadMethod });
+                logger.info('✅ Native Firebird client initialized successfully', { loadMethod });
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
                 const errorStack = error instanceof Error ? error.stack : undefined;
@@ -164,8 +196,8 @@ class NativeDriver implements IFirebirdDriver {
                     loadMethod
                 });
                 throw new FirebirdError(
-                    'node-firebird-driver-native no está instalado o no se pudo cargar. ' +
-                    'Instálalo globalmente con: npm install -g node-firebird-driver-native\n' +
+                    'node-firebird-driver-native is not installed or could not be loaded. ' +
+                    'Install it globally with: npm install -g node-firebird-driver-native\n' +
                     `Error: ${errorMessage}`,
                     ErrorTypes.DATABASE_CONNECTION,
                     { originalError: error }
@@ -178,7 +210,7 @@ class NativeDriver implements IFirebirdDriver {
         await this.initialize();
 
         try {
-            logger.info('Conectando con node-firebird-driver-native (Native Client)...', {
+            logger.info('Connecting with node-firebird-driver-native (Native Client)...', {
                 host: config.host,
                 port: config.port,
                 database: config.database,
@@ -222,7 +254,7 @@ class NativeDriver implements IFirebirdDriver {
             }
 
             // Use the standard connect method with connection options
-            const connectionOptions: any = {
+            const connectionOptions: { username: string; password: string; role?: string } = {
                 username: config.user,
                 password: config.password
             };
@@ -235,19 +267,19 @@ class NativeDriver implements IFirebirdDriver {
             logger.info('Connecting with standard connection options', connectionOptions);
 
             // Use the standard connect method
-            this.attachment = await (this.client as any).connect(
+            this.attachment = await this.client!.connect(
                 connectionString,
                 connectionOptions
             );
             
-            logger.info('Conexión exitosa con node-firebird-driver-native');
+            logger.info('Connection successful with node-firebird-driver-native');
             
             // Create adapter to match node-firebird interface
             return this.createAdapter(this.attachment);
         } catch (error) {
-            logger.error('Error al conectar con node-firebird-driver-native', { error });
+            logger.error('Error connecting with node-firebird-driver-native', { error });
             throw new FirebirdError(
-                `Error al conectar a la base de datos: ${error instanceof Error ? error.message : String(error)}`,
+                `Error connecting to database: ${error instanceof Error ? error.message : String(error)}`,
                 ErrorTypes.DATABASE_CONNECTION,
                 { originalError: error }
             );
@@ -257,10 +289,10 @@ class NativeDriver implements IFirebirdDriver {
     /**
      * Create adapter to match node-firebird interface
      */
-    private createAdapter(attachment: any): FirebirdDatabase {
+    private createAdapter(attachment: NativeAttachment): FirebirdDatabase {
         return {
-            query: async (sql: string, params: any[], callback: (err: Error | null, results?: any[]) => void) => {
-                let transaction;
+            query: async (sql: string, params: unknown[], callback: (err: Error | null, results?: FirebirdQueryResult[]) => void) => {
+                let transaction: NativeTransaction | undefined;
                 try {
                     // Start a transaction for the query
                     transaction = await attachment.startTransaction();
@@ -278,7 +310,7 @@ class NativeDriver implements IFirebirdDriver {
                     await transaction.commit();
 
                     // Return results
-                    callback(null, rows);
+                    callback(null, rows as FirebirdQueryResult[]);
                 } catch (err) {
                     // Rollback on error
                     if (transaction) {
@@ -325,9 +357,9 @@ export class DriverFactory {
         DriverFactory.instance = null; // Reset instance to force recreation
         
         if (useNative) {
-            logger.info('Configurado para usar node-firebird-driver-native (soporta wire encryption)');
+            logger.info('Configured to use node-firebird-driver-native (supports wire encryption)');
         } else {
-            logger.info('Configurado para usar node-firebird (Pure JavaScript, sin wire encryption)');
+            logger.info('Configured to use node-firebird (Pure JavaScript, without wire encryption)');
         }
     }
     
@@ -342,14 +374,14 @@ export class DriverFactory {
                     if (DriverFactory.instance.initialize) {
                         await DriverFactory.instance.initialize();
                     }
-                    logger.info('Usando node-firebird-driver-native');
+                    logger.info('Using node-firebird-driver-native');
                 } catch (error) {
-                    logger.warn('No se pudo cargar node-firebird-driver-native, usando node-firebird', { error });
+                    logger.warn('Could not load node-firebird-driver-native, using node-firebird', { error });
                     DriverFactory.instance = new PureJSDriver();
                 }
             } else {
                 DriverFactory.instance = new PureJSDriver();
-                logger.info('Usando node-firebird (Pure JavaScript)');
+                logger.info('Using node-firebird (Pure JavaScript)');
             }
         }
 
@@ -392,6 +424,19 @@ export class DriverFactory {
             nativeAvailable,
             supportsWireEncryption: driver.supportsWireEncryption()
         };
+    }
+    
+    /**
+     * Phase 7.2-7.3: Clean up driver resources
+     * Should be called during server shutdown
+     */
+    static async cleanup(): Promise<void> {
+        if (DriverFactory.instance) {
+            logger.info('Cleaning up driver resources');
+            // Reset the singleton instance
+            DriverFactory.instance = null;
+            logger.info('Driver resources cleaned up');
+        }
     }
 }
 
